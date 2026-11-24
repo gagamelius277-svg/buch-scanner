@@ -41,7 +41,8 @@ h1{margin:14px 0 8px;font-weight:800;font-size:clamp(2.1rem,8vw,3.2rem);line-hei
 #thumbs button:hover{transform:rotate(90deg);background:var(--g3)}
 .field{margin-top:18px;display:flex;flex-wrap:wrap;gap:10px;animation-delay:.24s}
 input[type=password],select{flex:1 1 200px;min-width:0;padding:13px 15px;border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--ink);font:inherit;backdrop-filter:blur(14px);transition:border-color .2s,box-shadow .2s}
-select{flex:0 1 170px}
+select{flex:1 1 170px}
+input[type=password]{flex-basis:100%}
 select option{color:#111}
 input:focus,select:focus{outline:0;border-color:var(--g1);box-shadow:0 0 0 4px rgba(139,92,246,.28)}
 button.main{position:relative;overflow:hidden;width:100%;margin-top:14px;padding:15px;border:0;border-radius:16px;color:#fff;font:700 1.05rem system-ui,sans-serif;text-shadow:0 1px 8px rgba(0,0,0,.35);cursor:pointer;background:linear-gradient(110deg,var(--g1),var(--g2),var(--g3),var(--g1));background-size:300% 100%;box-shadow:0 14px 30px -12px rgba(139,92,246,.75);transition:transform .2s,box-shadow .2s,opacity .3s;animation:rise .7s .32s both,flow 8s linear infinite}
@@ -92,6 +93,13 @@ details pre{white-space:pre-wrap;word-break:break-word;font:.85rem/1.5 ui-monosp
     <option value="deu">Deutsch</option>
     <option value="eng">Englisch</option>
   </select>
+  <select id="mode" aria-label="Art der Zusammenfassung">
+    <option value="kurz">Kurz (ca. 5 Sätze)</option>
+    <option value="standard" selected>Standard</option>
+    <option value="ausfuehrlich">Ausführlich</option>
+    <option value="detail">Sehr ausführlich</option>
+    <option value="stichpunkte">Nur Stichpunkte</option>
+  </select>
 </div>
 <button class="main" id="go" disabled>Zusammenfassen</button>
 <div id="status" role="status"></div>
@@ -115,7 +123,14 @@ const MODEL = "deepseek-chat";
 const TESS_SRC = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
 const MAX_SIDE = 2200;
 
-const SYSTEM = "Du erhältst per OCR erkannten Text aus Fotos von Buchseiten. Er kann Erkennungsfehler, Kopf- und Fußzeilen sowie Seitenzahlen enthalten; korrigiere offensichtliche Fehler stillschweigend und ignoriere Seitenzahlen und Kopfzeilen. Erstelle eine verständliche, gut strukturierte Zusammenfassung auf Deutsch: zuerst die Kernaussage in 2–3 Sätzen, danach die wichtigsten Informationen als Stichpunkte, bei längeren Texten mit Zwischenüberschriften. Nenne wichtige Begriffe, Namen und Zahlen. Erfinde nichts, was nicht im Text steht. Format: Markdown mit ## Überschriften, - Listen und **fett**.";
+const SYSTEM_BASE = "Du erhältst per OCR erkannten Text aus Fotos von Buchseiten. Er kann Erkennungsfehler, Kopf- und Fußzeilen sowie Seitenzahlen enthalten; korrigiere offensichtliche Fehler stillschweigend und ignoriere Seitenzahlen und Kopfzeilen. Antworte auf Deutsch und erfinde nichts, was nicht im Text steht. Format: Markdown mit ## Überschriften, - Listen und **fett**.";
+const MODES = {
+  kurz: { max: 700, p: "Fasse den Text kurz zusammen: höchstens 5 Sätze (ca. 80 Wörter) mit der Kernaussage und dem Wichtigsten. Keine Überschriften, keine Liste." },
+  standard: { max: 2000, p: "Erstelle eine verständliche, gut strukturierte Zusammenfassung: zuerst die Kernaussage in 2–3 Sätzen, danach die wichtigsten Informationen als Stichpunkte, bei längeren Texten mit Zwischenüberschriften. Nenne wichtige Begriffe, Namen und Zahlen." },
+  ausfuehrlich: { max: 4500, p: "Erstelle eine ausführliche Zusammenfassung von etwa einem Viertel bis einem Drittel der Länge des Originals: zuerst die Kernaussage, dann Abschnitt für Abschnitt mit Zwischenüberschriften alle wichtigen Argumente, Beispiele, Begriffe, Namen, Zahlen und Zusammenhänge. Lasse keine wesentlichen Punkte aus." },
+  detail: { max: 8000, p: "Erstelle eine sehr ausführliche Zusammenfassung von etwa der Hälfte der Länge des Originals: gliedere nach Abschnitten mit Zwischenüberschriften und gib den Inhalt in eigenen Worten nahezu vollständig wieder, inklusive Argumentationsgang, Beispielen, Begriffen, Namen und Zahlen. Lasse nur Füllmaterial und Wiederholungen weg." },
+  stichpunkte: { max: 1500, p: "Gib ausschließlich Stichpunkte aus, keinen Fließtext: höchstens 15 Punkte, gruppiert unter wenigen Zwischenüberschriften, jeder Punkt in einer Zeile." }
+};
 
 const $ = id => document.getElementById(id);
 let files = [];
@@ -197,7 +212,7 @@ $("go").addEventListener("click", async () => {
     if (pages.join("").length < 20) throw new Error("Es wurde kaum Text erkannt. Bitte schärfere, gut beleuchtete Fotos verwenden.");
 
     status("DeepSeek erstellt die Zusammenfassung …"); progress("wait");
-    summaryText = await summarize(text, key);
+    summaryText = await summarize(text, key, $("mode").value);
     $("sum").innerHTML = md(summaryText);
     [...$("sum").children].forEach((el, i) => el.style.animationDelay = Math.min(i * 70, 1000) + "ms");
     $("raw").textContent = text;
@@ -211,14 +226,14 @@ $("go").addEventListener("click", async () => {
   }
 });
 
-async function summarize(text, key) {
+async function summarize(text, key, mode) {
   const headers = { "Content-Type": "application/json" };
   if (!PROXY_URL) headers.Authorization = "Bearer " + key;
   let res;
   try {
     res = await fetch(PROXY_URL || API_URL, {
       method: "POST", headers,
-      body: JSON.stringify({ model: MODEL, temperature: 0.3, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: text }] })
+      body: JSON.stringify({ model: MODEL, temperature: 0.3, max_tokens: MODES[mode].max, messages: [{ role: "system", content: SYSTEM_BASE + " " + MODES[mode].p }, { role: "user", content: text }] })
     });
   } catch {
     throw new Error("Keine Verbindung zu DeepSeek (Netzwerk oder CORS). Bei CORS-Fehlern den Proxy aus worker.js verwenden.");
